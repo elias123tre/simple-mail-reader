@@ -54,6 +54,14 @@ fn main() {
                 current_mail = min(current_mail.saturating_add(1), total_mails - 1);
                 current_line = 0
             }
+            Key::Home => {
+                current_mail = 0;
+                current_line = 0;
+            }
+            Key::End => {
+                current_mail = total_mails - 1;
+                current_line = 0;
+            }
             _ => {}
         }
         let mail = &mails[current_mail].trim();
@@ -62,8 +70,6 @@ fn main() {
         match chr {
             Key::Up => current_line = min(current_line.saturating_sub(1), total_lines - 1),
             Key::Down => current_line = min(current_line.saturating_add(1), total_lines - 1),
-            Key::Home => current_line = 0,
-            Key::End => current_line = total_lines - 1,
             _ => {}
         }
         write!(

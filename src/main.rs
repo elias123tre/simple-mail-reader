@@ -1,12 +1,44 @@
 use std::cmp::min;
+use std::env;
+use std::error::Error;
 use std::fs;
 use std::io::{stdin, stdout, Write};
+use std::path::Path;
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use termion::screen::AlternateScreen;
 
 const SEPARATOR: &str = "\n\nFrom ";
+const MAIL_FOLDER: &str = "/var/mail";
+
+type Mail = String;
+
+type Mails = Vec<Mail>;
+
+trait MailsExtend {
+    type Output;
+    fn from_filename<P>(filename: P) -> Self::Output
+    where
+        P: AsRef<Path>;
+}
+impl MailsExtend for Mails {
+    type Output = Result<Self, Box<dyn Error>>;
+    fn from_filename<P>(filename: P) -> Self::Output
+    where
+        P: AsRef<Path>,
+    {
+        let mut mails = Self::new();
+        let contents = fs::read_to_string::<P>(filename)?;
+
+        let mut rest = &contents[..];
+        while let Some(split_i) = rest.find(SEPARATOR) {
+            mails.push(rest[..split_i].to_owned());
+            rest = &rest[split_i..];
+        }
+        Ok(mails)
+    }
+}
 
 fn main() {
     let stdin = stdin();
@@ -15,20 +47,28 @@ fn main() {
     // TODO: Parse arguments (https://docs.rs/structopt/0.3.25/structopt/)
     // TODO: Read mail from all users
 
-    let filename = "/var/mail/root";
-    let contents = fs::read_to_string(filename).expect("Could not read email file");
-    let mut all_mails = contents.split(SEPARATOR);
-    let mut mails: Vec<String> = Vec::new();
-    mails.push(
-        all_mails
-            .next()
-            .unwrap_or_else(|| {
-                println!("No mails to read.");
-                std::process::exit(0)
-            })
-            .to_string(),
-    );
-    all_mails.for_each(|s| mails.push(format!("{}{}", SEPARATOR.trim_start(), s)));
+    let mails: Mails;
+
+    // If user argument is provided
+    if let Some(user) = env::args().skip(1).next() {
+        let filename = Path::new(MAIL_FOLDER).join(&user);
+        mails = Mails::from_filename(filename).expect("User has no mail file");
+    } else {
+        // Else: read all mails
+        for dir in fs::read_dir(MAIL_FOLDER)
+            .expect("Unable to read mail folder")
+            .filter_map(Result::ok)
+        {
+            println!("{:?}", dir.file_name());
+        }
+        mails = Mails::new();
+    }
+
+    std::process::exit(0);
+
+    // let read_mail = |user: String| ;
+
+    // let mails = read_mail("");
     let total_mails = mails.len();
 
     println!("Press any key to read first mail. Press 'q' or ESC anytime to quit, use Page Up and Page Down to scroll between mails. Scroll lines with arrow keys.");
@@ -45,6 +85,7 @@ fn main() {
             Key::Left => println!("←"),
             Key::Right => println!("→"),
             Key::Backspace => println!("×"),
+            Key::Char('d') => println!("Deleting mail"),
 
             Key::PageUp => {
                 current_mail = min(current_mail.saturating_sub(1), total_mails - 1);

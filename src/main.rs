@@ -1,28 +1,64 @@
 use std::cmp::min;
-use std::env;
 use std::error::Error;
-use std::fs;
 use std::io::{stdin, stdout, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::{fs, iter};
+use structopt::StructOpt;
+use termion::cursor;
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use termion::screen::AlternateScreen;
 
-const SEPARATOR: &str = "\n\nFrom ";
-const MAIL_FOLDER: &str = "/var/mail";
+/// Format and print the arguments to stderr then exit the program with code 1
+#[macro_export]
+macro_rules! exit {
+    ($($arg:tt)*) => {
+        eprintln!($($arg)*);
+        std::process::exit(1);
+    };
+}
+
+/// Write arguments to buffer
+///
+/// First argument: buffer to write to
+#[macro_export]
+macro_rules! output {
+    ($buffer:expr, $first:expr) => {
+        write!($buffer, "{}", $first).unwrap();
+    };
+    ($buffer:expr, $first:expr, $($arg:tt)+) => {
+        write!($buffer, "{}", $first).unwrap();
+        output!($buffer, $($arg)+);
+    };
+}
+
+const SEPARATOR: &str = "From ";
 
 type Mail = String;
 
+trait FindField {
+    fn find_field<'a>(mail: &'a str, field: &'a str) -> Option<&'a str>;
+}
+impl FindField for Mail {
+    fn find_field<'a>(mail: &'a str, field: &'a str) -> Option<&'a str> {
+        let res = mail.lines().find(|p| p.starts_with(field));
+        match res {
+            Some(x) => Some(x.trim()),
+            _ => None,
+        }
+    }
+}
+
 type Mails = Vec<Mail>;
 
-trait MailsExtend {
+trait MailsConstructor {
     type Output;
     fn from_filename<P>(filename: P) -> Self::Output
     where
         P: AsRef<Path>;
 }
-impl MailsExtend for Mails {
+impl MailsConstructor for Mails {
     type Output = Result<Self, Box<dyn Error>>;
     fn from_filename<P>(filename: P) -> Self::Output
     where
@@ -30,62 +66,114 @@ impl MailsExtend for Mails {
     {
         let mut mails = Self::new();
         let contents = fs::read_to_string::<P>(filename)?;
+        let mut raw_mails = contents.split("\n\n").peekable();
 
-        let mut rest = &contents[..];
-        while let Some(split_i) = rest.find(SEPARATOR) {
-            mails.push(rest[..split_i].to_owned());
-            rest = &rest[split_i..];
+        while let Some(first) = raw_mails.next() {
+            {
+                let mut mail = first.to_owned();
+
+                // If next element is new mail, break, else add it to mail
+                while let Some(&s) = raw_mails.peek() {
+                    if s.starts_with(SEPARATOR) {
+                        break;
+                    } else {
+                        raw_mails.next();
+                        mail.push_str(s);
+                    }
+                }
+                mails.push(mail);
+            }
         }
         Ok(mails)
     }
 }
 
+#[derive(Debug, StructOpt)]
+#[structopt(
+    name = "Simple mail reader",
+    about = "A simple mail reader CLI made with Rust to view unix mails."
+)]
+struct Opt {
+    /// Users to skip reading mail from
+    #[structopt(short, long)]
+    skip: Option<Vec<String>>,
+
+    /// Path to the directory containing mail
+    #[structopt(short, long, parse(from_os_str))]
+    path: Option<PathBuf>,
+
+    /// User to read mail from
+    #[structopt(name = "USER")]
+    user: Option<String>,
+}
+
 fn main() {
+    const HEADER_HEIGHT: u16 = 2;
+
+    let opt = Opt::from_args();
+    let mail_folder = opt.path.unwrap_or(Path::new("/var/mail").to_path_buf());
+
     let stdin = stdin();
     let (_size_w, size_h) = termion::terminal_size().unwrap();
 
-    // TODO: Parse arguments (https://docs.rs/structopt/0.3.25/structopt/)
-    // TODO: Read mail from all users
+    let mut mails: Mails;
 
-    let mails: Mails;
-
-    // If user argument is provided
-    if let Some(user) = env::args().skip(1).next() {
-        let filename = Path::new(MAIL_FOLDER).join(&user);
-        mails = Mails::from_filename(filename).expect("User has no mail file");
+    if let Some(user) = opt.user {
+        println!("Getting mail from user: {}", user);
+        let filename = mail_folder.join(&user);
+        mails = Mails::from_filename(&filename).unwrap_or_else(|_| {
+            exit!(
+                "Error: User has no mail file in folder: {}",
+                filename.display()
+            );
+        });
     } else {
-        // Else: read all mails
-        for dir in fs::read_dir(MAIL_FOLDER)
+        println!("Getting mail from all users in folder");
+        mails = Mails::new();
+
+        let skip = opt.skip.unwrap_or(Vec::new());
+        for mail_file in fs::read_dir(&mail_folder)
             .expect("Unable to read mail folder")
             .filter_map(Result::ok)
         {
-            println!("{:?}", dir.file_name());
+            let user = mail_file
+                .file_name()
+                .to_str()
+                .unwrap_or_default()
+                .to_owned();
+            if skip.contains(&user) {
+                println!("Skipping user: {}", user);
+                continue;
+            }
+            if let Ok(mail) = Mails::from_filename(&mail_file.path()) {
+                mails.extend(mail);
+            }
         }
-        mails = Mails::new();
     }
 
-    std::process::exit(0);
-
-    // let read_mail = |user: String| ;
-
-    // let mails = read_mail("");
     let total_mails = mails.len();
-
-    println!("Press any key to read first mail. Press 'q' or ESC anytime to quit, use Page Up and Page Down to scroll between mails. Scroll lines with arrow keys.");
 
     let mut screen = AlternateScreen::from(stdout().into_raw_mode().unwrap());
 
     let mut current_mail: usize = 0;
     let mut current_line: usize = 0;
+    let mut delete_started = false;
 
-    for c in stdin.keys() {
+    // Null key is to display first mail without pressing key
+    for c in iter::once(Ok(Key::Null)).chain(stdin.keys()) {
         let chr = c.unwrap();
         match chr {
             Key::Esc | Key::Char('q') => break,
-            Key::Left => println!("←"),
-            Key::Right => println!("→"),
-            Key::Backspace => println!("×"),
-            Key::Char('d') => println!("Deleting mail"),
+            // Key::Left => println!("←"),
+            // Key::Right => println!("→"),
+            // Key::Backspace => println!("×"),
+            Key::Char('d') => {
+                if delete_started {
+                    todo!("Delete current mail");
+                } else {
+                    delete_started = true;
+                }
+            }
 
             Key::PageUp => {
                 current_mail = min(current_mail.saturating_sub(1), total_mails - 1);
@@ -105,7 +193,7 @@ fn main() {
             }
             _ => {}
         }
-        let mail = &mails[current_mail].trim();
+        let mail = mails[current_mail].trim();
         let lines = mail.lines();
         let total_lines = lines.clone().count();
         match chr {
@@ -113,42 +201,43 @@ fn main() {
             Key::Down => current_line = min(current_line.saturating_add(1), total_lines - 1),
             _ => {}
         }
-        write!(
+
+        output!(screen, termion::clear::All, cursor::Goto(1, 1));
+
+        let to = Mail::find_field(mail, "To: ").unwrap_or("Unknown");
+        let date = Mail::find_field(mail, "Date: ")
+            .unwrap_or("Unknown")
+            .split_whitespace()
+            .take(6) // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toString#description
+            .collect::<Vec<&str>>()
+            .join(" ");
+        let instructions =
+            "PgUp/PgDown/Home/End=prev/next/first/last  ↑/↓=prev/next line  q/esc=quit";
+        output!(
             screen,
-            "{}{}",
-            termion::clear::All,
-            termion::cursor::Goto(1, 2)
-        )
-        .unwrap();
-        for line in lines.skip(current_line).take(usize::from(size_h) - 2) {
+            termion::style::Underline,
+            cursor::Goto(1, 1),
+            format!(
+                "Reading mail {}/{}\t{}",
+                current_mail + 1,
+                total_mails,
+                instructions
+            ),
+            cursor::Goto(1, 2),
+            format!("{}\t{}", to, date),
+            termion::style::NoUnderline
+        );
+
+        output!(screen, cursor::Goto(1, HEADER_HEIGHT + 1));
+        for line in lines
+            .skip(current_line)
+            .take(usize::from(size_h) - HEADER_HEIGHT as usize)
+        {
             write!(screen, "{}\r\n", line).unwrap();
         }
-        write!(
-            screen,
-            "{}{}{}{}{}{}",
-            termion::cursor::Goto(1, 1),
-            termion::style::Underline,
-            format!("Reading mail {}/{}    ", current_mail + 1, total_mails),
-            mail.lines()
-                .find(|p| p.starts_with("Date: "))
-                .unwrap_or("Unknown")
-                .trim()
-                .split_whitespace()
-                .take(6) // https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toString#description
-                .collect::<Vec<&str>>()
-                .join(" "),
-            "    PgUp/Down=prev/next mail  ↑/↓=prev/next line  q/esc=quit",
-            termion::style::NoUnderline
-        )
-        .unwrap();
+
         screen.flush().unwrap();
     }
 
-    write!(
-        screen,
-        "{}{}",
-        termion::cursor::Show,
-        termion::cursor::Restore
-    )
-    .unwrap();
+    output!(screen, cursor::Show, cursor::Restore);
 }

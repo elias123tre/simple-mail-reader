@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/elias123tre/simple-mail-reader"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 termion = "1.5.6"
+structopt = "0.3.25"

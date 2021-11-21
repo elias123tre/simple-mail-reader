@@ -99,8 +99,8 @@ struct Opt {
     skip: Option<Vec<String>>,
 
     /// Path to the directory containing mail
-    #[structopt(short, long, parse(from_os_str))]
-    path: Option<PathBuf>,
+    #[structopt(short, long, parse(from_os_str), default_value = "/var/mail")]
+    path: PathBuf,
 
     /// User to read mail from
     #[structopt(name = "USER")]
@@ -111,8 +111,6 @@ fn main() {
     const HEADER_HEIGHT: u16 = 2;
 
     let opt = Opt::from_args();
-    let mail_folder = opt.path.unwrap_or(Path::new("/var/mail").to_path_buf());
-
     let stdin = stdin();
     let (_size_w, size_h) = termion::terminal_size().unwrap();
 
@@ -120,7 +118,7 @@ fn main() {
 
     if let Some(user) = opt.user {
         println!("Getting mail from user: {}", user);
-        let filename = mail_folder.join(&user);
+        let filename = opt.path.join(&user);
         mails = Mails::from_filename(&filename).unwrap_or_else(|_| {
             exit!(
                 "Error: User has no mail file in folder: {}",
@@ -132,7 +130,7 @@ fn main() {
         mails = Mails::new();
 
         let skip = opt.skip.unwrap_or(Vec::new());
-        for mail_file in fs::read_dir(&mail_folder)
+        for mail_file in fs::read_dir(&opt.path)
             .expect("Unable to read mail folder")
             .filter_map(Result::ok)
         {
@@ -164,9 +162,6 @@ fn main() {
         let chr = c.unwrap();
         match chr {
             Key::Esc | Key::Char('q') => break,
-            // Key::Left => println!("←"),
-            // Key::Right => println!("→"),
-            // Key::Backspace => println!("×"),
             Key::Char('d') => {
                 if delete_started {
                     todo!("Delete current mail");
